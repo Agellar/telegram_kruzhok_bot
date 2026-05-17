@@ -71,13 +71,83 @@ BOT_TOKEN=123:ABC CHANNEL_ID=@my_channel python bot.py
 | `CHANNEL_ID`    | `@your_channel`   | `@username` канала или `-100xxxxxxxxxx` |
 | `TEMP_DIR`      | `/tmp/videobot`   | Каталог для временных файлов |
 | `MAX_PARALLEL`  | `2`               | Параллельных ffmpeg-задач |
-| `MAX_FILE_MB`   | `20`              | Лимит входного файла (Bot API качает максимум 20 МБ) |
+| `MAX_FILE_MB`   | `20` / `500`†     | Лимит входного файла |
 | `USER_COOLDOWN` | `5`               | Минимальный интервал между запросами одного юзера, сек |
+| `TELEGRAM_API_BASE` | — (облако)    | Базовый URL локального Bot API сервера, напр. `http://telegram-bot-api:8081` |
 
-> **Важно:** стандартный Telegram Bot API не позволяет скачивать файлы
-> больше 20 МБ. Если нужен лимит выше — поднимите [локальный Bot API
-> сервер](https://github.com/tdlib/telegram-bot-api) и увеличьте
-> `MAX_FILE_MB`.
+† По умолчанию `20` для облачного API (потолок Telegram) и `500` при заданном
+`TELEGRAM_API_BASE` (локальный сервер, потолок 2000 МБ).
+
+## 🛰 Локальный Bot API сервер (снимает лимит 20 МБ)
+
+Стандартный облачный Bot API не отдаёт файлы больше **20 МБ**. Если нужно
+принимать видео большего размера, поднимите [локальный Bot API
+сервер](https://github.com/tdlib/telegram-bot-api) — потолок поднимется до
+**2 ГБ**, а `getFile` будет возвращать прямой путь к файлу на диске вместо URL.
+
+### 1. Получите `api_id` и `api_hash`
+
+Это **не токен от BotFather** — это идентификаторы Telegram-приложения:
+
+1. Зайдите на https://my.telegram.org → **API development tools**.
+2. Создайте приложение (любое название, платформа `Other`).
+3. Скопируйте `api_id` (число) и `api_hash` (строка).
+
+### 2. Отвяжите бота от облачного API
+
+Один бот не может одновременно работать в облаке и локально. Выполните **один раз**:
+
+```bash
+curl -X POST "https://api.telegram.org/bot<BOT_TOKEN>/logOut"
+```
+
+После этого облачный API будет отвечать `Unauthorized` — это нормально.
+
+> ⚠️ Обратный переход (`logOut` на локальном сервере → возврат в облако)
+> возможен, но требует ручного `close` и теряет накопленное состояние.
+> Если планируете часто переключаться — заведите отдельного бота для локального API.
+
+### 3. Запустите всё через docker-compose
+
+В корне репозитория уже лежат `Dockerfile` и `docker-compose.yml`.
+
+```bash
+cp .env.example .env
+# отредактируйте .env: BOT_TOKEN, CHANNEL_ID,
+# TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_API_BASE=http://telegram-bot-api:8081
+docker compose up -d --build
+docker compose logs -f bot
+```
+
+`docker-compose.yml` запускает два контейнера в общей сети:
+- **`telegram-bot-api`** — локальный API-сервер, порт `8081` доступен только внутри compose.
+- **`bot`** — сам бот, обращается к `http://telegram-bot-api:8081` и читает
+  файлы через общий volume `telegram-bot-api-data`.
+
+> 🔒 **Безопасность:** порт `8081` не публикуется наружу. Это полный
+> доступ к боту по токену — никогда не выставляйте его в интернет.
+
+### 4. Поднимите лимит
+
+В `.env`:
+
+```env
+TELEGRAM_API_BASE=http://telegram-bot-api:8081
+MAX_FILE_MB=500
+```
+
+Перезапустите: `docker compose up -d`. Бот теперь принимает файлы до 500 МБ
+(или сколько указано в `MAX_FILE_MB`, потолок — 2000 МБ).
+
+### Что ещё важно при локальном API
+
+| Аспект | Деталь |
+|--------|--------|
+| **Диск** | На каждое задание уйдёт до `2 × MAX_FILE_MB` (исходник + копия в `TEMP_DIR`). Для `MAX_FILE_MB=500` и `MAX_PARALLEL=2` нужно **≥ 2.5 ГБ свободно** на volume. |
+| **CPU** | Конвертация 30-минутного 1080p в 60-секундный 512×512 — 3–5 минут на ядре. Скорректируйте `USER_COOLDOWN`. |
+| **Сеть** | Скачивание 500 МБ от Telegram — 1–3 минуты. Дайте пользователю понятный статус. |
+| **Состояние** | Bot API сервер хранит сессию бота в volume. Не удаляйте volume — иначе нужен будет повторный `logOut`. |
+| **Уборка** | Bot API сервер **не удаляет** скачанные файлы автоматически. Бот делает это сам после копирования в `TEMP_DIR`. |
 
 ## 🖥 Требования к железу
 
@@ -132,22 +202,17 @@ BOT_TOKEN=123:ABC CHANNEL_ID=@my_channel python bot.py
 6. `ffmpeg` делает два прохода `libx264`, кроп до квадрата и ресайз 512×512.
 7. Результат отправляется как `video_note`, временные файлы удаляются.
 
-## 🐳 Запуск в Docker (опционально)
+## 🐳 Запуск в Docker (только бот, без локального API)
 
-```dockerfile
-FROM python:3.12-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-COPY bot.py .
-CMD ["python", "bot.py"]
-```
+В репозитории есть готовый `Dockerfile`:
 
 ```bash
 docker build -t kruzhok-bot .
 docker run --rm -e BOT_TOKEN=... -e CHANNEL_ID=@my_channel kruzhok-bot
 ```
+
+Если нужен локальный Bot API сервер для файлов > 20 МБ — используйте
+`docker-compose.yml` (см. раздел [«Локальный Bot API сервер»](#-локальный-bot-api-сервер-снимает-лимит-20-мб)).
 
 ## 📝 Лицензия
 

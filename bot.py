@@ -3,6 +3,7 @@ import re
 import json
 import time
 import uuid
+import shutil
 import asyncio
 import logging
 from pathlib import Path
@@ -11,6 +12,8 @@ from collections import defaultdict
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.telegram import TelegramAPIServer
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
 from aiogram.types import Message, FSInputFile, CallbackQuery
@@ -21,9 +24,17 @@ BOT_TOKEN     = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 CHANNEL_ID    = os.getenv("CHANNEL_ID", "@your_channel")
 TEMP_DIR      = Path(os.getenv("TEMP_DIR", "/tmp/videobot"))
 MAX_PARALLEL  = int(os.getenv("MAX_PARALLEL", "2"))
-# Bot API без локального сервера качает максимум 20 МБ.
-MAX_FILE_MB   = int(os.getenv("MAX_FILE_MB", "20"))
 USER_COOLDOWN = int(os.getenv("USER_COOLDOWN", "5"))  # секунд между запросами одного юзера
+
+# Локальный Bot API сервер (опционально). Если задан — лимит файлов растёт до 2 ГБ,
+# и getFile возвращает прямой путь к файлу на диске вместо URL.
+# Пример: http://telegram-bot-api:8081
+TELEGRAM_API_BASE = os.getenv("TELEGRAM_API_BASE", "").rstrip("/")
+USE_LOCAL_API     = bool(TELEGRAM_API_BASE)
+
+# По умолчанию облачный Bot API качает максимум 20 МБ; локальный — до 2 ГБ.
+_default_max_mb = 500 if USE_LOCAL_API else 20
+MAX_FILE_MB   = int(os.getenv("MAX_FILE_MB", str(_default_max_mb)))
 
 # Лимиты Telegram для video note
 VIDEO_NOTE_MAX_BYTES   = 12 * 1024 * 1024
@@ -41,10 +52,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-bot = Bot(
-    token=BOT_TOKEN,
-    default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-)
+
+def _build_bot() -> Bot:
+    default = DefaultBotProperties(parse_mode=ParseMode.HTML)
+    if USE_LOCAL_API:
+        api = TelegramAPIServer(
+            base=f"{TELEGRAM_API_BASE}/bot{{token}}/{{method}}",
+            file=f"{TELEGRAM_API_BASE}/file/bot{{token}}/{{path}}",
+            is_local=True,
+        )
+        logger.info("Используется локальный Bot API: %s", TELEGRAM_API_BASE)
+        return Bot(token=BOT_TOKEN, session=AiohttpSession(api=api), default=default)
+    return Bot(token=BOT_TOKEN, default=default)
+
+
+bot = _build_bot()
 dp = Dispatcher()
 semaphore = asyncio.Semaphore(MAX_PARALLEL)
 
@@ -257,7 +279,14 @@ async def handle_video(message: Message) -> None:
     async with semaphore:
         try:
             file_info = await bot.get_file(file_obj.file_id)
-            await bot.download_file(file_info.file_path, destination=str(src))
+            # В локальном режиме Bot API возвращает абсолютный путь на диске —
+            # копируем напрямую, в облачном — качаем по HTTP.
+            if USE_LOCAL_API and file_info.file_path and Path(file_info.file_path).is_absolute():
+                await asyncio.to_thread(shutil.copy, file_info.file_path, str(src))
+                with suppress(Exception):
+                    Path(file_info.file_path).unlink()  # Bot API не чистит локальные файлы сам
+            else:
+                await bot.download_file(file_info.file_path, destination=str(src))
             logger.info("Downloaded user=%s job=%s", uid, job_id)
 
             if not await convert_to_video_note(src, dst):
@@ -346,8 +375,11 @@ async def on_shutdown() -> None:
 async def main() -> None:
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
-    logger.info("Bot starting | channel=%s | parallel=%d | max_mb=%d",
-                CHANNEL_ID, MAX_PARALLEL, MAX_FILE_MB)
+    logger.info(
+        "Bot starting | channel=%s | parallel=%d | max_mb=%d | api=%s",
+        CHANNEL_ID, MAX_PARALLEL, MAX_FILE_MB,
+        TELEGRAM_API_BASE if USE_LOCAL_API else "cloud",
+    )
     await dp.start_polling(bot)
 
 

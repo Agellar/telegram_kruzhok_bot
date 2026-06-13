@@ -38,6 +38,10 @@ services:
       WEB_MAX_FILE_MB: "${WEB_MAX_FILE_MB:-50}"
       WEB_MAX_PARALLEL: "${WEB_MAX_PARALLEL:-2}"
       WEB_RATE_SECONDS: "${WEB_RATE_SECONDS:-15}"
+      STATS_DB: /data/stats.db
+    volumes:
+      # пишет статистику веб-конвертаций в общую БД (таблица web_jobs)
+      - botdata:/data
     expose:
       - "8000"
 

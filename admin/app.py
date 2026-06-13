@@ -195,6 +195,30 @@ def api_timeseries(_: None = Depends(require_auth), days: int = Query(30, le=365
     return JSONResponse(rows)
 
 
+@app.get(f"{BASE}/api/web_summary")
+def api_web_summary(_: None = Depends(require_auth)) -> JSONResponse:
+    """Статистика публичного веб-конвертера (таблица web_jobs)."""
+    now = time.time()
+    d1, d7 = now - 86400, now - 7 * 86400
+
+    def one(rows, key="c"):
+        return rows[0][key] if rows else 0
+
+    langs = q(
+        """SELECT COALESCE(lang,'?') lang, COUNT(*) c FROM web_jobs
+           GROUP BY lang ORDER BY c DESC LIMIT 8""")
+    return JSONResponse({
+        "total": one(q("SELECT COUNT(*) c FROM web_jobs")),
+        "ok": one(q("SELECT COUNT(*) c FROM web_jobs WHERE status='ok'")),
+        "failed": one(q("SELECT COUNT(*) c FROM web_jobs WHERE status<>'ok'")),
+        "today": one(q("SELECT COUNT(*) c FROM web_jobs WHERE ts>=?", (d1,))),
+        "week": one(q("SELECT COUNT(*) c FROM web_jobs WHERE ts>=?", (d7,))),
+        "bytes_in": one(q("SELECT COALESCE(SUM(in_size_bytes),0) s FROM web_jobs"), "s"),
+        "unique_ips": one(q("SELECT COUNT(DISTINCT ip_hash) c FROM web_jobs")),
+        "langs": langs,
+    })
+
+
 @app.get(f"{BASE}/api/errors")
 def api_errors(_: None = Depends(require_auth)) -> JSONResponse:
     rows = q(

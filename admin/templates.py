@@ -198,6 +198,9 @@ tbody tr:hover{background:#fafbff}
     <div class="section-title">Активность</div>
     <div class="minis" id="minis"></div>
 
+    <div class="section-title">Веб-конвертер (сайт)</div>
+    <div class="minis" id="webMinis"></div>
+
     <div class="section-title">Динамика</div>
     <div class="grid2">
       <div class="panel">
@@ -290,6 +293,21 @@ async function loadKpis(){
   return s;
 }
 
+async function loadWeb(){
+  const w = await get('/api/web_summary');
+  const rate = w.total ? Math.round(100*w.ok/w.total)+'%' : '—';
+  const topLang = (w.langs && w.langs.length) ? w.langs[0].lang.toUpperCase() : '—';
+  $('webMinis').innerHTML = [
+    ['Конвертаций', w.total, ''],
+    ['За 24ч', w.today, ''],
+    ['Успешно', rate, 'ok'],
+    ['Уник. IP', w.unique_ips, ''],
+    ['Трафик', fmtBytes(w.bytes_in), ''],
+    ['Топ язык', topLang, ''],
+  ].map(([l,v,c])=>`<div class="mini"><div class="label">${l}</div>
+      <div class="val ${c}">${v}</div></div>`).join('');
+}
+
 async function loadCharts(s){
   const ts = await get('/api/timeseries?days=30');
   mk('chartDays',{type:'line',
@@ -360,7 +378,7 @@ async function loadJobs(){
 }
 
 async function refresh(){
-  try{ const s=await loadKpis(); await Promise.all([loadCharts(s),loadUsers(),loadJobs()]); }
+  try{ const s=await loadKpis(); await Promise.all([loadCharts(s),loadWeb(),loadUsers(),loadJobs()]); }
   catch(e){ if(e.message!=='auth') $('#updated').textContent='ошибка обновления'; }
 }
 refresh();

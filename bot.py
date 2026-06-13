@@ -19,6 +19,8 @@ from aiogram.filters import CommandStart
 from aiogram.types import Message, FSInputFile, CallbackQuery
 from aiogram.exceptions import TelegramBadRequest
 
+import stats
+
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
 BOT_TOKEN     = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 CHANNEL_ID    = os.getenv("CHANNEL_ID", "@your_channel")
@@ -69,6 +71,27 @@ def _build_bot() -> Bot:
 bot = _build_bot()
 dp = Dispatcher()
 semaphore = asyncio.Semaphore(MAX_PARALLEL)
+
+# ─── STATS HELPERS ────────────────────────────────────────────────────────────
+# Все вызовы статистики идут через asyncio.to_thread (sqlite — блокирующий I/O)
+# и никогда не должны ронять обработку — внутри stats.* всё под suppress.
+async def _track_user(message: Message) -> None:
+    u = message.from_user
+    with suppress(Exception):
+        await asyncio.to_thread(
+            stats.upsert_user, u.id, u.username, u.first_name, u.last_name
+        )
+
+
+async def _track_event(user_id: int | None, etype: str) -> None:
+    with suppress(Exception):
+        await asyncio.to_thread(stats.log_event, user_id, etype)
+
+
+async def _track_job(**kw) -> None:
+    with suppress(Exception):
+        await asyncio.to_thread(lambda: stats.log_job(**kw))
+
 
 # user_id → timestamp последнего запроса
 _last_request: dict[int, float] = defaultdict(float)
@@ -207,7 +230,10 @@ def safe_suffix(filename: str | None) -> str:
 # ─── HANDLERS ─────────────────────────────────────────────────────────────────
 @dp.message(CommandStart())
 async def cmd_start(message: Message) -> None:
+    await _track_user(message)
+    await _track_event(message.from_user.id, "start")
     if not await is_subscribed(message.from_user.id):
+        await _track_event(message.from_user.id, "sub_required")
         await message.answer(TEXT_NOT_SUBSCRIBED, reply_markup=subscribe_keyboard())
         return
     await message.answer(TEXT_WELCOME)
@@ -216,6 +242,7 @@ async def cmd_start(message: Message) -> None:
 @dp.callback_query(F.data == "check_sub")
 async def check_sub_callback(callback: CallbackQuery) -> None:
     if await is_subscribed(callback.from_user.id):
+        await _track_event(callback.from_user.id, "sub_confirmed")
         with suppress(TelegramBadRequest):
             await callback.message.edit_text(TEXT_WELCOME)
         await callback.answer()
@@ -229,8 +256,10 @@ async def check_sub_callback(callback: CallbackQuery) -> None:
 @dp.message(F.video | F.document)
 async def handle_video(message: Message) -> None:
     uid = message.from_user.id
+    await _track_user(message)
 
     if not await is_subscribed(uid):
+        await _track_event(uid, "sub_required")
         await message.answer(TEXT_NOT_SUBSCRIBED, reply_markup=subscribe_keyboard())
         return
 
@@ -276,6 +305,15 @@ async def handle_video(message: Message) -> None:
     dst = TEMP_DIR / f"{uid}_{job_id}_out.mp4"
     status = await message.answer("⏳ Конвертирую видео, подожди немного…")
 
+    # ── stats: данные задания фиксируем по факту, итог пишем в finally ──
+    job_kind = "document" if message.document else "video"
+    job_in_size = file_obj.file_size
+    job_duration = duration_meta
+    job_status = "error"          # перезаписывается ниже по ходу выполнения
+    job_error_code: str | None = None
+    job_out_size: int | None = None
+    job_t0 = time.monotonic()
+
     async with semaphore:
         try:
             file_info = await bot.get_file(file_obj.file_id)
@@ -290,6 +328,7 @@ async def handle_video(message: Message) -> None:
             logger.info("Downloaded user=%s job=%s", uid, job_id)
 
             if not await convert_to_video_note(src, dst):
+                job_status = "convert_fail"
                 with suppress(TelegramBadRequest):
                     await status.edit_text(
                         "❌ Ошибка конвертации.\n"
@@ -297,13 +336,24 @@ async def handle_video(message: Message) -> None:
                     )
                 return
 
+            with suppress(Exception):
+                job_out_size = dst.stat().st_size
+
             await message.answer_video_note(video_note=FSInputFile(str(dst)))
+            job_status = "ok"
             with suppress(TelegramBadRequest):
                 await status.delete()
             logger.info("Sent video note user=%s job=%s", uid, job_id)
 
         except TelegramBadRequest as exc:
             err = str(exc)
+            job_status = "tg_error"
+            if "VOICE_MESSAGES_FORBIDDEN" in err:
+                job_error_code = "voice_forbidden"
+            elif "file is too big" in err.lower():
+                job_error_code = "too_big"
+            else:
+                job_error_code = "tg_bad_request"
             logger.error("TelegramBadRequest user=%s: %s", uid, err)
             with suppress(TelegramBadRequest):
                 if "VOICE_MESSAGES_FORBIDDEN" in err:
@@ -323,16 +373,32 @@ async def handle_video(message: Message) -> None:
                     await status.edit_text("❌ Telegram отклонил файл. Попробуй ещё раз.")
 
         except Exception as exc:
+            job_status = "error"
+            job_error_code = type(exc).__name__
             logger.exception("Unexpected error user=%s: %s", uid, exc)
             with suppress(TelegramBadRequest):
                 await status.edit_text("❌ Непредвиденная ошибка. Попробуй ещё раз.")
         finally:
             cleanup(src, dst)
+            await _track_job(
+                user_id=uid,
+                kind=job_kind,
+                file_name=original_name,
+                in_size_bytes=job_in_size,
+                in_duration_sec=job_duration,
+                out_size_bytes=job_out_size,
+                status=job_status,
+                error_code=job_error_code,
+                processing_ms=int((time.monotonic() - job_t0) * 1000),
+            )
 
 
 @dp.message(F.text | F.photo | F.audio | F.voice | F.sticker | F.animation)
 async def handle_other(message: Message) -> None:
+    await _track_user(message)
+    await _track_event(message.from_user.id, "other_msg")
     if not await is_subscribed(message.from_user.id):
+        await _track_event(message.from_user.id, "sub_required")
         await message.answer(TEXT_NOT_SUBSCRIBED, reply_markup=subscribe_keyboard())
         return
     await message.answer("🎥 Отправь мне видеофайл. Другие типы сообщений не принимаются.")
@@ -340,6 +406,8 @@ async def handle_other(message: Message) -> None:
 # ─── STARTUP / SHUTDOWN ───────────────────────────────────────────────────────
 async def on_startup() -> None:
     global _channel_link
+    with suppress(Exception):
+        stats.init_db()
     try:
         chat = await bot.get_chat(CHANNEL_ID)
         logger.info("Канал найден: '%s' (id=%s, type=%s)", chat.title, chat.id, chat.type)

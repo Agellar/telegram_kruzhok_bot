@@ -1,37 +1,56 @@
+# Развёрнутый стек: бот (облачный Bot API) + админка статистики + Caddy (авто-TLS).
+#
+# Если нужны файлы > 20 МБ — поднимите локальный Bot API сервер и добавьте сервис
+# telegram-bot-api (см. README, раздел «Локальный Bot API сервер»), затем задайте
+# боту TELEGRAM_API_BASE=http://telegram-bot-api:8081 и общий том для файлов.
 services:
-  # Локальный Bot API сервер — снимает лимит 20 МБ на скачивание файлов
-  # и поднимает потолок до 2 ГБ. Использует api_id/api_hash с my.telegram.org.
-  telegram-bot-api:
-    image: aiogram/telegram-bot-api:latest
-    restart: unless-stopped
-    environment:
-      TELEGRAM_API_ID: "${TELEGRAM_API_ID}"
-      TELEGRAM_API_HASH: "${TELEGRAM_API_HASH}"
-      TELEGRAM_LOCAL: "1"
-      TELEGRAM_STAT: "1"
-    volumes:
-      - telegram-bot-api-data:/var/lib/telegram-bot-api
-    # Порт наружу НЕ публикуем — общение идёт по внутренней сети compose.
-    expose:
-      - "8081"
-
   bot:
     build: .
+    container_name: telegram_kruzhok_bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      STATS_DB: /data/stats.db
+    volumes:
+      - botdata:/data
+      - /tmp/videobot:/tmp/videobot
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  admin:
+    build: ./admin
+    container_name: kruzhok_admin
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      STATS_DB: /data/stats.db
+    volumes:
+      # rw-монтирование нужно для SQLite WAL (-shm/-wal sidecar-файлы),
+      # сама админка открывает БД в режиме query_only=ON и только читает.
+      - botdata:/data
+    expose:
+      - "8000"
+
+  caddy:
+    image: caddy:2
+    container_name: kruzhok_caddy
     restart: unless-stopped
     depends_on:
-      - telegram-bot-api
+      - admin
+    ports:
+      - "80:80"
+      - "443:443"
     environment:
-      BOT_TOKEN: "${BOT_TOKEN}"
-      CHANNEL_ID: "${CHANNEL_ID}"
-      MAX_PARALLEL: "${MAX_PARALLEL:-2}"
-      USER_COOLDOWN: "${USER_COOLDOWN:-5}"
-      MAX_FILE_MB: "${MAX_FILE_MB:-500}"
-      TELEGRAM_API_BASE: "http://telegram-bot-api:8081"
-      TEMP_DIR: "/var/lib/telegram-bot-api/tmp"
+      DOMAIN: "${DOMAIN}"
     volumes:
-      # Тот же том, что и у API-сервера — бот читает файлы прямо с диска,
-      # а не качает их по HTTP. В локальном режиме это критично.
-      - telegram-bot-api-data:/var/lib/telegram-bot-api
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
 
 volumes:
-  telegram-bot-api-data:
+  botdata:
+  caddy_data:
+  caddy_config:

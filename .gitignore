@@ -7,6 +7,9 @@ venv/
 .env.*
 !.env.example
 *.log
+*.db
+*.db-wal
+*.db-shm
 /tmp/
 .idea/
 .vscode/

@@ -1,17 +1,14 @@
 {$DOMAIN} {
 	encode gzip
 
-	# Приватная админка статистики — всё под /admin*
+	# Админка статистики — всё под /admin*
 	@admin path /admin /admin/*
 	handle @admin {
 		reverse_proxy admin:8000
 	}
 
-	# Всё остальное — публичный конвертер видео → видеокружок
+	# Остальное (включая корень) — редирект на админку
 	handle {
-		request_body {
-			max_size 60MB
-		}
-		reverse_proxy web:8000
+		redir https://{host}/admin 302
 	}
 }

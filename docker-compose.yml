@@ -29,29 +29,12 @@ services:
     expose:
       - "8000"
 
-  web:
-    # Публичный конвертер видео → видеокружок (ffmpeg). Без авторизации.
-    build: ./web
-    container_name: kruzhok_web
-    restart: unless-stopped
-    environment:
-      WEB_MAX_FILE_MB: "${WEB_MAX_FILE_MB:-50}"
-      WEB_MAX_PARALLEL: "${WEB_MAX_PARALLEL:-2}"
-      WEB_RATE_SECONDS: "${WEB_RATE_SECONDS:-15}"
-      STATS_DB: /data/stats.db
-    volumes:
-      # пишет статистику веб-конвертаций в общую БД (таблица web_jobs)
-      - botdata:/data
-    expose:
-      - "8000"
-
   caddy:
     image: caddy:2
     container_name: kruzhok_caddy
     restart: unless-stopped
     depends_on:
       - admin
-      - web
     ports:
       - "80:80"
       - "443:443"

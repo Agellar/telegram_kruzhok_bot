@@ -1,8 +1,3 @@
-# Развёрнутый стек: бот (облачный Bot API) + админка статистики + Caddy (авто-TLS).
-#
-# Если нужны файлы > 20 МБ — поднимите локальный Bot API сервер и добавьте сервис
-# telegram-bot-api (см. README, раздел «Локальный Bot API сервер»), затем задайте
-# боту TELEGRAM_API_BASE=http://telegram-bot-api:8081 и общий том для файлов.
 services:
   bot:
     build: .
@@ -34,12 +29,25 @@ services:
     expose:
       - "8000"
 
+  web:
+    # Публичный конвертер видео → видеокружок (ffmpeg). Без авторизации.
+    build: ./web
+    container_name: kruzhok_web
+    restart: unless-stopped
+    environment:
+      WEB_MAX_FILE_MB: "${WEB_MAX_FILE_MB:-50}"
+      WEB_MAX_PARALLEL: "${WEB_MAX_PARALLEL:-2}"
+      WEB_RATE_SECONDS: "${WEB_RATE_SECONDS:-15}"
+    expose:
+      - "8000"
+
   caddy:
     image: caddy:2
     container_name: kruzhok_caddy
     restart: unless-stopped
     depends_on:
       - admin
+      - web
     ports:
       - "80:80"
       - "443:443"

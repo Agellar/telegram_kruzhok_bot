@@ -1,11 +1,12 @@
 """
 Веб-админка для telegram_kruzhok_bot.
 
-Читает stats.db (SQLite) и отдаёт дашборд + JSON-API.
-Авторизация — cookie-сессия (красивая страница /login вместо браузерного
-Basic Auth попапа). Кука подписана HMAC (stdlib, без доп. зависимостей).
+Смонтирована за reverse-proxy под префиксом /admin (Caddy маршрутизирует
+/admin* сюда, а корень — на публичный конвертер). Все маршруты, кука и ссылки
+используют этот префикс.
 
-Запуск: uvicorn app:app --host 0.0.0.0 --port 8000
+Авторизация — cookie-сессия (страница /admin/login вместо браузерного Basic
+Auth попапа). Кука подписана HMAC (stdlib, без доп. зависимостей).
 """
 import os
 import hmac
@@ -20,13 +21,13 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from templates import LOGIN_HTML, DASHBOARD_HTML
 
+BASE = "/admin"  # префикс монтирования (Caddy отдаёт /admin* этому сервису)
+
 DB_PATH = os.getenv("STATS_DB", "/data/stats.db")
 ADMIN_USER = os.getenv("ADMIN_USER", "admin")
 ADMIN_PASS = os.getenv("ADMIN_PASS", "admin")
-# Секрет для подписи сессионной куки. Если не задан — генерируем на старте
-# (это инвалидирует сессии при рестарте, что приемлемо для одного админа).
 SESSION_SECRET = os.getenv("SESSION_SECRET", secrets.token_hex(32)).encode()
-SESSION_TTL = 7 * 24 * 3600  # 7 дней
+SESSION_TTL = 7 * 24 * 3600
 COOKIE_NAME = "kruzhok_session"
 
 app = FastAPI(title="Kruzhok Bot Admin", docs_url=None, redoc_url=None, openapi_url=None)
@@ -65,8 +66,6 @@ def require_auth(request: Request) -> None:
 
 # ─── DB ───────────────────────────────────────────────────────────────────────
 def db() -> sqlite3.Connection:
-    # Том монтируется rw (нужно для WAL sidecar-файлов), но query_only=ON
-    # гарантирует, что админка ничего не пишет в саму БД.
     conn = sqlite3.connect(f"file:{DB_PATH}", uri=True, timeout=5)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=3000;")
@@ -88,10 +87,10 @@ def q(sql: str, params: tuple = ()) -> list[dict]:
 
 
 # ─── AUTH ROUTES ──────────────────────────────────────────────────────────────
-@app.get("/login", response_class=HTMLResponse)
+@app.get(f"{BASE}/login", response_class=HTMLResponse)
 def login_page(request: Request, error: int = 0) -> HTMLResponse:
     if valid_session(request.cookies.get(COOKIE_NAME)):
-        return RedirectResponse("/", status_code=302)
+        return RedirectResponse(BASE, status_code=302)
     html = LOGIN_HTML.replace(
         "<!--ERROR-->",
         '<div class="error">Неверный логин или пароль</div>' if error else "",
@@ -99,31 +98,30 @@ def login_page(request: Request, error: int = 0) -> HTMLResponse:
     return HTMLResponse(html)
 
 
-@app.post("/login")
+@app.post(f"{BASE}/login")
 def login_submit(username: str = Form(...), password: str = Form(...)) -> RedirectResponse:
     ok = (secrets.compare_digest(username, ADMIN_USER)
           and secrets.compare_digest(password, ADMIN_PASS))
     if not ok:
-        # небольшая задержка против перебора
         time.sleep(0.5)
-        return RedirectResponse("/login?error=1", status_code=302)
-    resp = RedirectResponse("/", status_code=302)
+        return RedirectResponse(f"{BASE}/login?error=1", status_code=302)
+    resp = RedirectResponse(BASE, status_code=302)
     resp.set_cookie(
         COOKIE_NAME, make_session(),
-        max_age=SESSION_TTL, httponly=True, samesite="lax", secure=True,
+        max_age=SESSION_TTL, httponly=True, samesite="lax", secure=True, path=BASE,
     )
     return resp
 
 
-@app.get("/logout")
+@app.get(f"{BASE}/logout")
 def logout() -> RedirectResponse:
-    resp = RedirectResponse("/login", status_code=302)
-    resp.delete_cookie(COOKIE_NAME)
+    resp = RedirectResponse(f"{BASE}/login", status_code=302)
+    resp.delete_cookie(COOKIE_NAME, path=BASE)
     return resp
 
 
 # ─── API ──────────────────────────────────────────────────────────────────────
-@app.get("/api/summary")
+@app.get(f"{BASE}/api/summary")
 def api_summary(_: None = Depends(require_auth)) -> JSONResponse:
     now = time.time()
     d1, d7 = now - 86400, now - 7 * 86400
@@ -146,7 +144,7 @@ def api_summary(_: None = Depends(require_auth)) -> JSONResponse:
     })
 
 
-@app.get("/api/users")
+@app.get(f"{BASE}/api/users")
 def api_users(_: None = Depends(require_auth),
               sort: str = Query("total_jobs"),
               limit: int = Query(500, le=2000)) -> JSONResponse:
@@ -162,7 +160,7 @@ def api_users(_: None = Depends(require_auth),
     return JSONResponse(rows)
 
 
-@app.get("/api/jobs")
+@app.get(f"{BASE}/api/jobs")
 def api_jobs(_: None = Depends(require_auth),
              limit: int = Query(200, le=1000),
              user_id: int | None = None) -> JSONResponse:
@@ -183,7 +181,7 @@ def api_jobs(_: None = Depends(require_auth),
     return JSONResponse(rows)
 
 
-@app.get("/api/timeseries")
+@app.get(f"{BASE}/api/timeseries")
 def api_timeseries(_: None = Depends(require_auth), days: int = Query(30, le=365)) -> JSONResponse:
     since = time.time() - days * 86400
     rows = q(
@@ -197,7 +195,7 @@ def api_timeseries(_: None = Depends(require_auth), days: int = Query(30, le=365
     return JSONResponse(rows)
 
 
-@app.get("/api/errors")
+@app.get(f"{BASE}/api/errors")
 def api_errors(_: None = Depends(require_auth)) -> JSONResponse:
     rows = q(
         """SELECT COALESCE(error_code, status) code, COUNT(*) c
@@ -207,14 +205,14 @@ def api_errors(_: None = Depends(require_auth)) -> JSONResponse:
     return JSONResponse(rows)
 
 
-@app.get("/healthz")
+@app.get(f"{BASE}/healthz")
 def healthz() -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
 # ─── DASHBOARD ────────────────────────────────────────────────────────────────
-@app.get("/", response_class=HTMLResponse)
+@app.get(BASE, response_class=HTMLResponse)
 def dashboard(request: Request) -> HTMLResponse:
     if not valid_session(request.cookies.get(COOKIE_NAME)):
-        return RedirectResponse("/login", status_code=302)
+        return RedirectResponse(f"{BASE}/login", status_code=302)
     return HTMLResponse(DASHBOARD_HTML)

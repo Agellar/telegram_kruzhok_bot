@@ -68,7 +68,7 @@ button:active{transform:translateY(1px)}
       <p>Панель статистики</p>
     </div>
     <!--ERROR-->
-    <form method="post" action="/login">
+    <form method="post" action="/admin/login">
       <div class="field">
         <label for="u">Логин</label>
         <input id="u" name="username" type="text" autocomplete="username"
@@ -188,7 +188,7 @@ tbody tr:hover{background:#fafbff}
     </div>
     <div class="spacer"></div>
     <span class="pill"><span class="dot"></span> онлайн</span>
-    <a href="/logout"><button class="btn-ghost">Выйти</button></a>
+    <a href="/admin/logout"><button class="btn-ghost">Выйти</button></a>
   </div>
 
   <main>
@@ -257,7 +257,7 @@ const fmtBytes = b => { if(!b) return '—'; const u=['B','KB','MB','GB'];
 const fmtTime = ts => ts ? new Date(ts*1000).toLocaleString('ru-RU',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}) : '—';
 const fmtName = r => [r.first_name, r.last_name].filter(Boolean).join(' ') || (r.username?'@'+r.username:'') || ('id'+r.user_id);
 const fmtUn = r => r.username ? '@'+r.username : ('id '+r.user_id);
-async function get(u){ const r=await fetch(u); if(r.status===401){location.href='/login';throw new Error('auth');}
+async function get(u){ const r=await fetch('/admin'+u); if(r.status===401){location.href='/admin/login';throw new Error('auth');}
   if(!r.ok) throw new Error(r.status); return r.json(); }
 
 const GRID='#eef0f4', TICK='#9aa3b2';
